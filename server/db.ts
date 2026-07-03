@@ -1,110 +1,44 @@
-import { eq, desc, asc } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/mysql2";
-import {
-  InsertUser,
-  users,
-  clinicSettings,
-  homePageContent,
-  aboutPageContent,
-  servicesPageContent,
-  services,
-  galleryPageContent,
-  galleryItems,
-  faqPageContent,
-  faqItems,
-  whyChooseUsPageContent,
-  whyChooseUsFeatures,
-  bookingPageContent,
-  bookingFormFields,
-  bookingSubmissions,
-  seoSettings,
-  ClinicSettings,
-  HomePageContent,
-  AboutPageContent,
-  Service,
-  GalleryItem,
-  FaqItem,
-  WhyChooseUsFeature,
-  BookingFormField,
-  BookingSubmission,
-  SeoSettings,
-  ServicesPageContent,
-  GalleryPageContent,
-  FaqPageContent,
-  WhyChooseUsPageContent,
-  BookingPageContent,
-} from "../drizzle/schema";
-import { ENV } from './_core/env';
-import type { InsertHomePageContent, InsertAboutPageContent, InsertServicesPageContent, InsertGalleryPageContent, InsertFaqPageContent, InsertWhyChooseUsPageContent, InsertBookingPageContent } from "../drizzle/schema";
+import { createClient } from "@supabase/supabase-js";
+import type { Database } from "../shared/types";
 
-let _db: ReturnType<typeof drizzle> | null = null;
+const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
+const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// Lazily create the drizzle instance so local tooling can run without a DB.
-export async function getDb() {
-  if (!_db && process.env.DATABASE_URL) {
-    try {
-      _db = drizzle(process.env.DATABASE_URL);
-    } catch (error) {
-      console.warn("[Database] Failed to connect:", error);
-      _db = null;
-    }
-  }
-  return _db;
+if (!supabaseUrl || !supabaseServiceKey) {
+  console.warn("[Database] Missing Supabase environment variables");
 }
 
-export async function upsertUser(user: InsertUser): Promise<void> {
-  if (!user.openId) {
-    throw new Error("User openId is required for upsert");
-  }
+// Server-side Supabase client with service role key (bypasses RLS for admin operations)
+export const supabase = supabaseUrl && supabaseServiceKey
+  ? createClient<Database>(supabaseUrl, supabaseServiceKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false,
+      },
+    })
+  : null;
 
-  const db = await getDb();
-  if (!db) {
+// ============ USERS ============
+
+export async function upsertUser(user: { openId: string; name?: string | null; email?: string | null; loginMethod?: string | null; userId?: string }): Promise<void> {
+  if (!supabase) {
     console.warn("[Database] Cannot upsert user: database not available");
     return;
   }
 
   try {
-    const values: InsertUser = {
-      openId: user.openId,
-    };
-    const updateSet: Record<string, unknown> = {};
+    const { error } = await supabase
+      .from("users")
+      .upsert({
+        open_id: user.openId,
+        user_id: user.userId || null,
+        name: user.name || null,
+        email: user.email || null,
+        login_method: user.loginMethod || null,
+        last_signed_in: new Date().toISOString(),
+      }, { onConflict: "open_id" });
 
-    const textFields = ["name", "email", "loginMethod"] as const;
-    type TextField = (typeof textFields)[number];
-
-    const assignNullable = (field: TextField) => {
-      const value = user[field];
-      if (value === undefined) return;
-      const normalized = value ?? null;
-      values[field] = normalized;
-      updateSet[field] = normalized;
-    };
-
-    textFields.forEach(assignNullable);
-
-    if (user.lastSignedIn !== undefined) {
-      values.lastSignedIn = user.lastSignedIn;
-      updateSet.lastSignedIn = user.lastSignedIn;
-    }
-    if (user.role !== undefined) {
-      values.role = user.role;
-      updateSet.role = user.role;
-    } else if (user.openId === ENV.ownerOpenId) {
-      values.role = 'admin';
-      updateSet.role = 'admin';
-    }
-
-    if (!values.lastSignedIn) {
-      values.lastSignedIn = new Date();
-    }
-
-    if (Object.keys(updateSet).length === 0) {
-      updateSet.lastSignedIn = new Date();
-    }
-
-    await db.insert(users).values(values).onDuplicateKeyUpdate({
-      set: updateSet,
-    });
+    if (error) throw error;
   } catch (error) {
     console.error("[Database] Failed to upsert user:", error);
     throw error;
@@ -112,433 +46,875 @@ export async function upsertUser(user: InsertUser): Promise<void> {
 }
 
 export async function getUserByOpenId(openId: string) {
-  const db = await getDb();
-  if (!db) {
+  if (!supabase) {
     console.warn("[Database] Cannot get user: database not available");
     return undefined;
   }
 
-  const result = await db.select().from(users).where(eq(users.openId, openId)).limit(1);
+  const { data, error } = await supabase
+    .from("users")
+    .select("*")
+    .eq("open_id", openId)
+    .maybeSingle();
 
-  return result.length > 0 ? result[0] : undefined;
+  if (error) {
+    console.error("[Database] Failed to get user:", error);
+    return undefined;
+  }
+
+  return data ? mapUser(data) : undefined;
+}
+
+export async function getUserByUserId(userId: string) {
+  if (!supabase) return undefined;
+
+  const { data, error } = await supabase
+    .from("users")
+    .select("*")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error || !data) return undefined;
+  return mapUser(data);
+}
+
+function mapUser(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    openId: row.open_id,
+    userId: row.user_id,
+    name: row.name,
+    email: row.email,
+    loginMethod: row.login_method,
+    role: row.role,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastSignedIn: row.last_signed_in,
+  };
 }
 
 // ============ CLINIC SETTINGS ============
 
-export async function getClinicSettings(): Promise<ClinicSettings | null> {
-  const db = await getDb();
-  if (!db) return null;
+export async function getClinicSettings() {
+  if (!supabase) return null;
 
-  const result = await db.select().from(clinicSettings).limit(1);
-  return result.length > 0 ? result[0] : null;
+  const { data, error } = await supabase
+    .from("clinic_settings")
+    .select("*")
+    .maybeSingle();
+
+  if (error) {
+    console.error("[Database] Failed to get clinic settings:", error);
+    return null;
+  }
+
+  return data ? mapClinicSettings(data) : null;
 }
 
-export async function updateClinicSettings(data: Partial<Omit<ClinicSettings, 'id' | 'createdAt' | 'updatedAt'>>): Promise<ClinicSettings> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function updateClinicSettings(data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
   const existing = await getClinicSettings();
-  
+
   if (!existing) {
-    // Create new settings
-    await db.insert(clinicSettings).values({
-      clinicName: data.clinicName || "Dental Clinic",
-      doctorName: data.doctorName || "Dr. Name",
-      bookingNotificationEmail: data.bookingNotificationEmail || "admin@clinic.com",
-      ...data,
-    } as any);
-    
-    return (await getClinicSettings())!;
+    const { error } = await supabase.from("clinic_settings").insert({
+      clinic_name: data.clinicName || "Dental Clinic",
+      doctor_name: data.doctorName || "Dr. Name",
+      booking_notification_email: data.bookingNotificationEmail || "admin@clinic.com",
+      ...mapToSnakeCase(data),
+    });
+
+    if (error) throw error;
+    return await getClinicSettings();
   } else {
-    // Update existing
-    await db.update(clinicSettings).set(data as any).where(eq(clinicSettings.id, existing.id));
-    return (await getClinicSettings())!;
+    const { error } = await supabase
+      .from("clinic_settings")
+      .update(mapToSnakeCase(data))
+      .eq("id", existing.id);
+
+    if (error) throw error;
+    return await getClinicSettings();
   }
+}
+
+function mapClinicSettings(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    clinicName: row.clinic_name,
+    doctorName: row.doctor_name,
+    doctorQualification: row.doctor_qualification,
+    doctorExperience: row.doctor_experience,
+    address: row.address,
+    phone: row.phone,
+    email: row.email,
+    whatsapp: row.whatsapp,
+    instagram: row.instagram,
+    facebook: row.facebook,
+    googleBusiness: row.google_business,
+    youtube: row.youtube,
+    linkedin: row.linkedin,
+    bookingNotificationEmail: row.booking_notification_email,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 // ============ HOME PAGE ============
 
-export async function getHomePageContent(): Promise<HomePageContent | null> {
-  const db = await getDb();
-  if (!db) return null;
+export async function getHomePageContent() {
+  if (!supabase) return null;
 
-  const result = await db.select().from(homePageContent).limit(1);
-  return result.length > 0 ? result[0] : null;
+  const { data, error } = await supabase
+    .from("home_page_content")
+    .select("*")
+    .maybeSingle();
+
+  if (error) return null;
+  return data ? mapHomePageContent(data) : null;
 }
 
-export async function updateHomePageContent(data: Partial<InsertHomePageContent>): Promise<HomePageContent> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function updateHomePageContent(data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
   const existing = await getHomePageContent();
-  
+
   if (!existing) {
-    await db.insert(homePageContent).values(data as any);
-    return (await getHomePageContent())!;
+    const { error } = await supabase.from("home_page_content").insert(mapToSnakeCase(data));
+    if (error) throw error;
   } else {
-    await db.update(homePageContent).set(data).where(eq(homePageContent.id, existing.id));
-    return (await getHomePageContent())!;
+    const { error } = await supabase
+      .from("home_page_content")
+      .update(mapToSnakeCase(data))
+      .eq("id", existing.id);
+    if (error) throw error;
   }
+
+  return await getHomePageContent();
+}
+
+function mapHomePageContent(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    badge: row.badge,
+    heading: row.heading,
+    backgroundImageUrl: row.background_image_url,
+    backgroundVideoUrl: row.background_video_url,
+    backgroundMediaType: row.background_media_type,
+    h2Sections: row.h2_sections,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 // ============ ABOUT PAGE ============
 
-export async function getAboutPageContent(): Promise<AboutPageContent | null> {
-  const db = await getDb();
-  if (!db) return null;
+export async function getAboutPageContent() {
+  if (!supabase) return null;
 
-  const result = await db.select().from(aboutPageContent).limit(1);
-  return result.length > 0 ? result[0] : null;
+  const { data, error } = await supabase
+    .from("about_page_content")
+    .select("*")
+    .maybeSingle();
+
+  if (error) return null;
+  return data ? mapAboutPageContent(data) : null;
 }
 
-export async function updateAboutPageContent(data: Partial<InsertAboutPageContent>): Promise<AboutPageContent> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function updateAboutPageContent(data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
   const existing = await getAboutPageContent();
-  
+
   if (!existing) {
-    await db.insert(aboutPageContent).values(data as any);
-    return (await getAboutPageContent())!;
+    const { error } = await supabase.from("about_page_content").insert(mapToSnakeCase(data));
+    if (error) throw error;
   } else {
-    await db.update(aboutPageContent).set(data).where(eq(aboutPageContent.id, existing.id));
-    return (await getAboutPageContent())!;
+    const { error } = await supabase
+      .from("about_page_content")
+      .update(mapToSnakeCase(data))
+      .eq("id", existing.id);
+    if (error) throw error;
   }
+
+  return await getAboutPageContent();
+}
+
+function mapAboutPageContent(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    badge: row.badge,
+    heading: row.heading,
+    description: row.description,
+    doctorImageUrl: row.doctor_image_url,
+    backgroundImageUrl: row.background_image_url,
+    backgroundVideoUrl: row.background_video_url,
+    backgroundMediaType: row.background_media_type,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 // ============ SERVICES ============
 
-export async function getServicesPageContent(): Promise<ServicesPageContent | null> {
-  const db = await getDb();
-  if (!db) return null;
+export async function getServicesPageContent() {
+  if (!supabase) return null;
 
-  const result = await db.select().from(servicesPageContent).limit(1);
-  return result.length > 0 ? result[0] : null;
+  const { data, error } = await supabase
+    .from("services_page_content")
+    .select("*")
+    .maybeSingle();
+
+  if (error) return null;
+  return data ? mapServicesPageContent(data) : null;
 }
 
-export async function updateServicesPageContent(data: Partial<InsertServicesPageContent>): Promise<ServicesPageContent> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function updateServicesPageContent(data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
   const existing = await getServicesPageContent();
-  
+
   if (!existing) {
-    await db.insert(servicesPageContent).values(data as any);
-    return (await getServicesPageContent())!;
+    const { error } = await supabase.from("services_page_content").insert(mapToSnakeCase(data));
+    if (error) throw error;
   } else {
-    await db.update(servicesPageContent).set(data).where(eq(servicesPageContent.id, existing.id));
-    return (await getServicesPageContent())!;
+    const { error } = await supabase
+      .from("services_page_content")
+      .update(mapToSnakeCase(data))
+      .eq("id", existing.id);
+    if (error) throw error;
   }
+
+  return await getServicesPageContent();
 }
 
-export async function getAllServices(): Promise<Service[]> {
-  const db = await getDb();
-  if (!db) return [];
-
-  return db.select().from(services).orderBy(asc(services.sortOrder), desc(services.createdAt));
+function mapServicesPageContent(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    badge: row.badge,
+    heading: row.heading,
+    backgroundImageUrl: row.background_image_url,
+    backgroundVideoUrl: row.background_video_url,
+    backgroundMediaType: row.background_media_type,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
-export async function getServiceBySlug(slug: string): Promise<Service | null> {
-  const db = await getDb();
-  if (!db) return null;
+export async function getAllServices() {
+  if (!supabase) return [];
 
-  const result = await db.select().from(services).where(eq(services.slug, slug)).limit(1);
-  return result.length > 0 ? result[0] : null;
+  const { data, error } = await supabase
+    .from("services")
+    .select("*")
+    .order("sort_order", { ascending: true })
+    .order("created_at", { ascending: false });
+
+  if (error) return [];
+  return data.map(mapService);
 }
 
-export async function createService(data: Omit<Service, 'id' | 'createdAt' | 'updatedAt'>): Promise<Service> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function getServiceBySlug(slug: string) {
+  if (!supabase) return null;
 
-  await db.insert(services).values(data as any);
-  return (await getServiceBySlug(data.slug))!;
+  const { data, error } = await supabase
+    .from("services")
+    .select("*")
+    .eq("slug", slug)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return mapService(data);
 }
 
-export async function updateService(id: number, data: Partial<Service>): Promise<Service> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function createService(data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
-  await db.update(services).set(data).where(eq(services.id, id));
-  const result = await db.select().from(services).where(eq(services.id, id)).limit(1);
-  return result[0]!;
+  const { error } = await supabase.from("services").insert(mapToSnakeCase(data));
+  if (error) throw error;
+
+  return await getServiceBySlug(data.slug as string);
 }
 
-export async function deleteService(id: number): Promise<void> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function updateService(id: number, data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
-  await db.delete(services).where(eq(services.id, id));
+  const { error } = await supabase
+    .from("services")
+    .update(mapToSnakeCase(data))
+    .eq("id", id);
+
+  if (error) throw error;
+
+  const { data: updated, error: fetchError } = await supabase
+    .from("services")
+    .select("*")
+    .eq("id", id)
+    .single();
+
+  if (fetchError) throw fetchError;
+  return mapService(updated);
+}
+
+export async function deleteService(id: number) {
+  if (!supabase) throw new Error("Database not available");
+
+  const { error } = await supabase.from("services").delete().eq("id", id);
+  if (error) throw error;
+}
+
+function mapService(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    title: row.title,
+    slug: row.slug,
+    shortDescription: row.short_description,
+    detailedDescription: row.detailed_description,
+    imageUrl: row.image_url,
+    sortOrder: row.sort_order,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 // ============ GALLERY ============
 
-export async function getGalleryPageContent(): Promise<GalleryPageContent | null> {
-  const db = await getDb();
-  if (!db) return null;
+export async function getGalleryPageContent() {
+  if (!supabase) return null;
 
-  const result = await db.select().from(galleryPageContent).limit(1);
-  return result.length > 0 ? result[0] : null;
+  const { data, error } = await supabase
+    .from("gallery_page_content")
+    .select("*")
+    .maybeSingle();
+
+  if (error) return null;
+  return data ? mapGalleryPageContent(data) : null;
 }
 
-export async function updateGalleryPageContent(data: Partial<InsertGalleryPageContent>): Promise<GalleryPageContent> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function updateGalleryPageContent(data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
   const existing = await getGalleryPageContent();
-  
+
   if (!existing) {
-    await db.insert(galleryPageContent).values(data as any);
-    return (await getGalleryPageContent())!;
+    const { error } = await supabase.from("gallery_page_content").insert(mapToSnakeCase(data));
+    if (error) throw error;
   } else {
-    await db.update(galleryPageContent).set(data).where(eq(galleryPageContent.id, existing.id));
-    return (await getGalleryPageContent())!;
+    const { error } = await supabase
+      .from("gallery_page_content")
+      .update(mapToSnakeCase(data))
+      .eq("id", existing.id);
+    if (error) throw error;
   }
+
+  return await getGalleryPageContent();
 }
 
-export async function getAllGalleryItems(): Promise<GalleryItem[]> {
-  const db = await getDb();
-  if (!db) return [];
-
-  return db.select().from(galleryItems).orderBy(asc(galleryItems.sortOrder), desc(galleryItems.createdAt));
+function mapGalleryPageContent(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    badge: row.badge,
+    heading: row.heading,
+    backgroundImageUrl: row.background_image_url,
+    backgroundVideoUrl: row.background_video_url,
+    backgroundMediaType: row.background_media_type,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
-export async function createGalleryItem(data: Omit<GalleryItem, 'id' | 'createdAt' | 'updatedAt'>): Promise<GalleryItem> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function getAllGalleryItems() {
+  if (!supabase) return [];
 
-  const result = await db.insert(galleryItems).values(data as any);
-  const id = (result as any).insertId;
-  return (await db.select().from(galleryItems).where(eq(galleryItems.id, id)).limit(1))[0]!;
+  const { data, error } = await supabase
+    .from("gallery_items")
+    .select("*")
+    .order("sort_order", { ascending: true })
+    .order("created_at", { ascending: false });
+
+  if (error) return [];
+  return data.map(mapGalleryItem);
 }
 
-export async function updateGalleryItem(id: number, data: Partial<GalleryItem>): Promise<GalleryItem> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function createGalleryItem(data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
-  await db.update(galleryItems).set(data).where(eq(galleryItems.id, id));
-  return (await db.select().from(galleryItems).where(eq(galleryItems.id, id)).limit(1))[0]!;
+  const { data: inserted, error } = await supabase
+    .from("gallery_items")
+    .insert(mapToSnakeCase(data))
+    .select()
+    .single();
+
+  if (error) throw error;
+  return mapGalleryItem(inserted);
 }
 
-export async function deleteGalleryItem(id: number): Promise<void> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function updateGalleryItem(id: number, data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
-  await db.delete(galleryItems).where(eq(galleryItems.id, id));
+  const { data: updated, error } = await supabase
+    .from("gallery_items")
+    .update(mapToSnakeCase(data))
+    .eq("id", id)
+    .select()
+    .single();
+
+  if (error) throw error;
+  return mapGalleryItem(updated);
+}
+
+export async function deleteGalleryItem(id: number) {
+  if (!supabase) throw new Error("Database not available");
+
+  const { error } = await supabase.from("gallery_items").delete().eq("id", id);
+  if (error) throw error;
+}
+
+function mapGalleryItem(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    heading: row.heading,
+    description: row.description,
+    imageUrl: row.image_url,
+    sortOrder: row.sort_order,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 // ============ FAQ ============
 
-export async function getFaqPageContent(): Promise<FaqPageContent | null> {
-  const db = await getDb();
-  if (!db) return null;
+export async function getFaqPageContent() {
+  if (!supabase) return null;
 
-  const result = await db.select().from(faqPageContent).limit(1);
-  return result.length > 0 ? result[0] : null;
+  const { data, error } = await supabase
+    .from("faq_page_content")
+    .select("*")
+    .maybeSingle();
+
+  if (error) return null;
+  return data ? mapFaqPageContent(data) : null;
 }
 
-export async function updateFaqPageContent(data: Partial<InsertFaqPageContent>): Promise<FaqPageContent> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function updateFaqPageContent(data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
   const existing = await getFaqPageContent();
-  
+
   if (!existing) {
-    await db.insert(faqPageContent).values(data as any);
-    return (await getFaqPageContent())!;
+    const { error } = await supabase.from("faq_page_content").insert(mapToSnakeCase(data));
+    if (error) throw error;
   } else {
-    await db.update(faqPageContent).set(data).where(eq(faqPageContent.id, existing.id));
-    return (await getFaqPageContent())!;
+    const { error } = await supabase
+      .from("faq_page_content")
+      .update(mapToSnakeCase(data))
+      .eq("id", existing.id);
+    if (error) throw error;
   }
+
+  return await getFaqPageContent();
 }
 
-export async function getAllFaqItems(): Promise<FaqItem[]> {
-  const db = await getDb();
-  if (!db) return [];
-
-  return db.select().from(faqItems).orderBy(asc(faqItems.sortOrder), desc(faqItems.createdAt));
+function mapFaqPageContent(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    badge: row.badge,
+    heading: row.heading,
+    backgroundImageUrl: row.background_image_url,
+    backgroundVideoUrl: row.background_video_url,
+    backgroundMediaType: row.background_media_type,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
-export async function createFaqItem(data: Omit<FaqItem, 'id' | 'createdAt' | 'updatedAt'>): Promise<FaqItem> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function getAllFaqItems() {
+  if (!supabase) return [];
 
-  const result = await db.insert(faqItems).values(data as any);
-  const id = (result as any).insertId;
-  return (await db.select().from(faqItems).where(eq(faqItems.id, id)).limit(1))[0]!;
+  const { data, error } = await supabase
+    .from("faq_items")
+    .select("*")
+    .order("sort_order", { ascending: true })
+    .order("created_at", { ascending: false });
+
+  if (error) return [];
+  return data.map(mapFaqItem);
 }
 
-export async function updateFaqItem(id: number, data: Partial<FaqItem>): Promise<FaqItem> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function createFaqItem(data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
-  await db.update(faqItems).set(data).where(eq(faqItems.id, id));
-  return (await db.select().from(faqItems).where(eq(faqItems.id, id)).limit(1))[0]!;
+  const { data: inserted, error } = await supabase
+    .from("faq_items")
+    .insert(mapToSnakeCase(data))
+    .select()
+    .single();
+
+  if (error) throw error;
+  return mapFaqItem(inserted);
 }
 
-export async function deleteFaqItem(id: number): Promise<void> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function updateFaqItem(id: number, data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
-  await db.delete(faqItems).where(eq(faqItems.id, id));
+  const { data: updated, error } = await supabase
+    .from("faq_items")
+    .update(mapToSnakeCase(data))
+    .eq("id", id)
+    .select()
+    .single();
+
+  if (error) throw error;
+  return mapFaqItem(updated);
+}
+
+export async function deleteFaqItem(id: number) {
+  if (!supabase) throw new Error("Database not available");
+
+  const { error } = await supabase.from("faq_items").delete().eq("id", id);
+  if (error) throw error;
+}
+
+function mapFaqItem(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    question: row.question,
+    answer: row.answer,
+    sortOrder: row.sort_order,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 // ============ WHY CHOOSE US ============
 
-export async function getWhyChooseUsPageContent(): Promise<WhyChooseUsPageContent | null> {
-  const db = await getDb();
-  if (!db) return null;
+export async function getWhyChooseUsPageContent() {
+  if (!supabase) return null;
 
-  const result = await db.select().from(whyChooseUsPageContent).limit(1);
-  return result.length > 0 ? result[0] : null;
+  const { data, error } = await supabase
+    .from("why_choose_us_page_content")
+    .select("*")
+    .maybeSingle();
+
+  if (error) return null;
+  return data ? mapWhyChooseUsPageContent(data) : null;
 }
 
-export async function updateWhyChooseUsPageContent(data: Partial<InsertWhyChooseUsPageContent>): Promise<WhyChooseUsPageContent> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function updateWhyChooseUsPageContent(data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
   const existing = await getWhyChooseUsPageContent();
-  
+
   if (!existing) {
-    await db.insert(whyChooseUsPageContent).values(data as any);
-    return (await getWhyChooseUsPageContent())!;
+    const { error } = await supabase.from("why_choose_us_page_content").insert(mapToSnakeCase(data));
+    if (error) throw error;
   } else {
-    await db.update(whyChooseUsPageContent).set(data).where(eq(whyChooseUsPageContent.id, existing.id));
-    return (await getWhyChooseUsPageContent())!;
+    const { error } = await supabase
+      .from("why_choose_us_page_content")
+      .update(mapToSnakeCase(data))
+      .eq("id", existing.id);
+    if (error) throw error;
   }
+
+  return await getWhyChooseUsPageContent();
 }
 
-export async function getAllWhyChooseUsFeatures(): Promise<WhyChooseUsFeature[]> {
-  const db = await getDb();
-  if (!db) return [];
-
-  return db.select().from(whyChooseUsFeatures).orderBy(asc(whyChooseUsFeatures.sortOrder), desc(whyChooseUsFeatures.createdAt));
+function mapWhyChooseUsPageContent(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    badge: row.badge,
+    heading: row.heading,
+    description: row.description,
+    featureImageUrl: row.feature_image_url,
+    backgroundImageUrl: row.background_image_url,
+    backgroundVideoUrl: row.background_video_url,
+    backgroundMediaType: row.background_media_type,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
-export async function createWhyChooseUsFeature(data: Omit<WhyChooseUsFeature, 'id' | 'createdAt' | 'updatedAt'>): Promise<WhyChooseUsFeature> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function getAllWhyChooseUsFeatures() {
+  if (!supabase) return [];
 
-  const result = await db.insert(whyChooseUsFeatures).values(data as any);
-  const id = (result as any).insertId;
-  return (await db.select().from(whyChooseUsFeatures).where(eq(whyChooseUsFeatures.id, id)).limit(1))[0]!;
+  const { data, error } = await supabase
+    .from("why_choose_us_features")
+    .select("*")
+    .order("sort_order", { ascending: true })
+    .order("created_at", { ascending: false });
+
+  if (error) return [];
+  return data.map(mapWhyChooseUsFeature);
 }
 
-export async function updateWhyChooseUsFeature(id: number, data: Partial<WhyChooseUsFeature>): Promise<WhyChooseUsFeature> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function createWhyChooseUsFeature(data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
-  await db.update(whyChooseUsFeatures).set(data).where(eq(whyChooseUsFeatures.id, id));
-  return (await db.select().from(whyChooseUsFeatures).where(eq(whyChooseUsFeatures.id, id)).limit(1))[0]!;
+  const { data: inserted, error } = await supabase
+    .from("why_choose_us_features")
+    .insert(mapToSnakeCase(data))
+    .select()
+    .single();
+
+  if (error) throw error;
+  return mapWhyChooseUsFeature(inserted);
 }
 
-export async function deleteWhyChooseUsFeature(id: number): Promise<void> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function updateWhyChooseUsFeature(id: number, data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
-  await db.delete(whyChooseUsFeatures).where(eq(whyChooseUsFeatures.id, id));
+  const { data: updated, error } = await supabase
+    .from("why_choose_us_features")
+    .update(mapToSnakeCase(data))
+    .eq("id", id)
+    .select()
+    .single();
+
+  if (error) throw error;
+  return mapWhyChooseUsFeature(updated);
+}
+
+export async function deleteWhyChooseUsFeature(id: number) {
+  if (!supabase) throw new Error("Database not available");
+
+  const { error } = await supabase.from("why_choose_us_features").delete().eq("id", id);
+  if (error) throw error;
+}
+
+function mapWhyChooseUsFeature(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    heading: row.heading,
+    description: row.description,
+    icon: row.icon,
+    sortOrder: row.sort_order,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 // ============ BOOKING PAGE ============
 
-export async function getBookingPageContent(): Promise<BookingPageContent | null> {
-  const db = await getDb();
-  if (!db) return null;
+export async function getBookingPageContent() {
+  if (!supabase) return null;
 
-  const result = await db.select().from(bookingPageContent).limit(1);
-  return result.length > 0 ? result[0] : null;
+  const { data, error } = await supabase
+    .from("booking_page_content")
+    .select("*")
+    .maybeSingle();
+
+  if (error) return null;
+  return data ? mapBookingPageContent(data) : null;
 }
 
-export async function updateBookingPageContent(data: Partial<InsertBookingPageContent>): Promise<BookingPageContent> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function updateBookingPageContent(data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
   const existing = await getBookingPageContent();
-  
+
   if (!existing) {
-    await db.insert(bookingPageContent).values(data as any);
-    return (await getBookingPageContent())!;
+    const { error } = await supabase.from("booking_page_content").insert(mapToSnakeCase(data));
+    if (error) throw error;
   } else {
-    await db.update(bookingPageContent).set(data).where(eq(bookingPageContent.id, existing.id));
-    return (await getBookingPageContent())!;
+    const { error } = await supabase
+      .from("booking_page_content")
+      .update(mapToSnakeCase(data))
+      .eq("id", existing.id);
+    if (error) throw error;
   }
+
+  return await getBookingPageContent();
+}
+
+function mapBookingPageContent(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    welcomeMessage: row.welcome_message,
+    backgroundImageUrl: row.background_image_url,
+    backgroundVideoUrl: row.background_video_url,
+    backgroundMediaType: row.background_media_type,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 // ============ BOOKING FORM FIELDS ============
 
-export async function getAllBookingFormFields(): Promise<BookingFormField[]> {
-  const db = await getDb();
-  if (!db) return [];
+export async function getAllBookingFormFields() {
+  if (!supabase) return [];
 
-  return db.select().from(bookingFormFields).orderBy(asc(bookingFormFields.sortOrder), desc(bookingFormFields.createdAt));
+  const { data, error } = await supabase
+    .from("booking_form_fields")
+    .select("*")
+    .order("sort_order", { ascending: true })
+    .order("created_at", { ascending: false });
+
+  if (error) return [];
+  return data.map(mapBookingFormField);
 }
 
-export async function createBookingFormField(data: Omit<BookingFormField, 'id' | 'createdAt' | 'updatedAt'>): Promise<BookingFormField> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function createBookingFormField(data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
-  const result = await db.insert(bookingFormFields).values(data as any);
-  const id = (result as any).insertId;
-  return (await db.select().from(bookingFormFields).where(eq(bookingFormFields.id, id)).limit(1))[0]!;
+  const { data: inserted, error } = await supabase
+    .from("booking_form_fields")
+    .insert(mapToSnakeCase(data))
+    .select()
+    .single();
+
+  if (error) throw error;
+  return mapBookingFormField(inserted);
 }
 
-export async function updateBookingFormField(id: number, data: Partial<BookingFormField>): Promise<BookingFormField> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function updateBookingFormField(id: number, data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
-  await db.update(bookingFormFields).set(data).where(eq(bookingFormFields.id, id));
-  return (await db.select().from(bookingFormFields).where(eq(bookingFormFields.id, id)).limit(1))[0]!;
+  const { data: updated, error } = await supabase
+    .from("booking_form_fields")
+    .update(mapToSnakeCase(data))
+    .eq("id", id)
+    .select()
+    .single();
+
+  if (error) throw error;
+  return mapBookingFormField(updated);
 }
 
-export async function deleteBookingFormField(id: number): Promise<void> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function deleteBookingFormField(id: number) {
+  if (!supabase) throw new Error("Database not available");
 
-  await db.delete(bookingFormFields).where(eq(bookingFormFields.id, id));
+  const { error } = await supabase.from("booking_form_fields").delete().eq("id", id);
+  if (error) throw error;
+}
+
+function mapBookingFormField(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    fieldName: row.field_name,
+    fieldType: row.field_type,
+    label: row.label,
+    placeholder: row.placeholder,
+    isRequired: row.is_required,
+    sortOrder: row.sort_order,
+    options: row.options,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
 }
 
 // ============ BOOKING SUBMISSIONS ============
 
-export async function createBookingSubmission(data: Partial<Omit<BookingSubmission, 'id'>>): Promise<BookingSubmission> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function createBookingSubmission(data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
-  const result = await db.insert(bookingSubmissions).values(data as any);
-  const id = (result as any).insertId;
-  return (await db.select().from(bookingSubmissions).where(eq(bookingSubmissions.id, id)).limit(1))[0]!;
+  const { data: inserted, error } = await supabase
+    .from("booking_submissions")
+    .insert({
+      form_data: data.formData,
+      email_sent: data.emailSent ?? false,
+      email_error: data.emailError || null,
+    })
+    .select()
+    .single();
+
+  if (error) throw error;
+  return mapBookingSubmission(inserted);
 }
 
-export async function updateBookingSubmission(id: number, data: Partial<BookingSubmission>): Promise<void> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function updateBookingSubmission(id: number, data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
-  await db.update(bookingSubmissions).set(data).where(eq(bookingSubmissions.id, id));
+  const updateData: Record<string, unknown> = {};
+  if (data.emailSent !== undefined) updateData.email_sent = data.emailSent;
+  if (data.emailError !== undefined) updateData.email_error = data.emailError;
+
+  const { error } = await supabase
+    .from("booking_submissions")
+    .update(updateData)
+    .eq("id", id);
+
+  if (error) throw error;
+}
+
+function mapBookingSubmission(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    formData: row.form_data,
+    submittedAt: row.submitted_at,
+    emailSent: row.email_sent,
+    emailError: row.email_error,
+    createdAt: row.created_at,
+  };
 }
 
 // ============ SEO SETTINGS ============
 
-export async function getSeoSettingsBySlug(slug: string): Promise<SeoSettings | null> {
-  const db = await getDb();
-  if (!db) return null;
+export async function getSeoSettingsBySlug(slug: string) {
+  if (!supabase) return null;
 
-  const result = await db.select().from(seoSettings).where(eq(seoSettings.pageSlug, slug)).limit(1);
-  return result.length > 0 ? result[0] : null;
+  const { data, error } = await supabase
+    .from("seo_settings")
+    .select("*")
+    .eq("page_slug", slug)
+    .maybeSingle();
+
+  if (error) return null;
+  return data ? mapSeoSettings(data) : null;
 }
 
-export async function upsertSeoSettings(slug: string, data: Partial<SeoSettings>): Promise<SeoSettings> {
-  const db = await getDb();
-  if (!db) throw new Error("Database not available");
+export async function upsertSeoSettings(slug: string, data: Record<string, unknown>) {
+  if (!supabase) throw new Error("Database not available");
 
   const existing = await getSeoSettingsBySlug(slug);
-  
+
+  const rowData = {
+    page_slug: slug,
+    page_title: data.pageTitle || "Dental Clinic",
+    ...mapToSnakeCase(data),
+  };
+
   if (!existing) {
-    await db.insert(seoSettings).values({
-      pageSlug: slug,
-      pageTitle: data.pageTitle || "Dental Clinic",
-      ...data,
-    } as any);
-    return (await getSeoSettingsBySlug(slug))!;
+    const { error } = await supabase.from("seo_settings").insert(rowData);
+    if (error) throw error;
   } else {
-    await db.update(seoSettings).set(data).where(eq(seoSettings.pageSlug, slug));
-    return (await getSeoSettingsBySlug(slug))!;
+    const { error } = await supabase
+      .from("seo_settings")
+      .update(rowData)
+      .eq("page_slug", slug);
+    if (error) throw error;
   }
+
+  return await getSeoSettingsBySlug(slug);
+}
+
+function mapSeoSettings(row: Record<string, unknown>) {
+  return {
+    id: row.id,
+    pageSlug: row.page_slug,
+    pageTitle: row.page_title,
+    metaDescription: row.meta_description,
+    metaKeywords: row.meta_keywords,
+    ogTitle: row.og_title,
+    ogDescription: row.og_description,
+    ogImage: row.og_image,
+    twitterTitle: row.twitter_title,
+    twitterDescription: row.twitter_description,
+    twitterImage: row.twitter_image,
+    canonicalUrl: row.canonical_url,
+    schemaMarkup: row.schema_markup,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+// ============ HELPER ============
+
+function mapToSnakeCase(obj: Record<string, unknown>): Record<string, unknown> {
+  const result: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(obj)) {
+    const snakeKey = key.replace(/[A-Z]/g, (letter) => `_${letter.toLowerCase()}`);
+    result[snakeKey] = value;
+  }
+
+  return result;
 }

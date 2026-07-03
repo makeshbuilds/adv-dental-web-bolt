@@ -1,48 +1,70 @@
-import type { Express } from "express";
+import type { Express, Request, Response } from "express";
 import { ENV } from "./env";
 
 export function registerStorageProxy(app: Express) {
-  app.get("/manus-storage/*", async (req, res) => {
-    const key = (req.params as Record<string, string>)[0];
-    if (!key) {
-      res.status(400).send("Missing storage key");
-      return;
-    }
+  app.get("/api/storage/upload-url", async (req: Request, res: Response) => {
+    const { bucket, path: filePath } = req.query;
 
-    if (!ENV.forgeApiUrl || !ENV.forgeApiKey) {
-      res.status(500).send("Storage proxy not configured");
+    if (!bucket || !filePath) {
+      res.status(400).json({ error: "bucket and path are required" });
       return;
     }
 
     try {
-      const forgeUrl = new URL(
-        "v1/storage/presign/get",
-        ENV.forgeApiUrl.replace(/\/+$/, "") + "/",
-      );
-      forgeUrl.searchParams.set("path", key);
-
-      const forgeResp = await fetch(forgeUrl, {
-        headers: { Authorization: `Bearer ${ENV.forgeApiKey}` },
+      const { createClient } = await import("@supabase/supabase-js");
+      const supabase = createClient(ENV.supabaseUrl, ENV.supabaseServiceKey, {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+        },
       });
 
-      if (!forgeResp.ok) {
-        const body = await forgeResp.text().catch(() => "");
-        console.error(`[StorageProxy] forge error: ${forgeResp.status} ${body}`);
-        res.status(502).send("Storage backend error");
+      const { data, error } = await supabase.storage
+        .from(bucket as string)
+        .createSignedUploadUrl(filePath as string);
+
+      if (error) {
+        res.status(500).json({ error: error.message });
         return;
       }
 
-      const { url } = (await forgeResp.json()) as { url: string };
-      if (!url) {
-        res.status(502).send("Empty signed URL from backend");
-        return;
-      }
-
-      res.set("Cache-Control", "no-store");
-      res.redirect(307, url);
+      res.json(data);
     } catch (err) {
-      console.error("[StorageProxy] failed:", err);
-      res.status(502).send("Storage proxy error");
+      console.error("[Storage] Upload URL failed:", err);
+      res.status(500).json({ error: "Storage error" });
+    }
+  });
+
+  app.get("/api/storage/download-url", async (req: Request, res: Response) => {
+    const { bucket, path: filePath, expiresIn } = req.query;
+
+    if (!bucket || !filePath) {
+      res.status(400).json({ error: "bucket and path are required" });
+      return;
+    }
+
+    try {
+      const { createClient } = await import("@supabase/supabase-js");
+      const supabase = createClient(ENV.supabaseUrl, ENV.supabaseServiceKey, {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false,
+        },
+      });
+
+      const { data, error } = await supabase.storage
+        .from(bucket as string)
+        .createSignedUrl(filePath as string, parseInt(expiresIn as string) || 3600);
+
+      if (error) {
+        res.status(500).json({ error: error.message });
+        return;
+      }
+
+      res.json(data);
+    } catch (err) {
+      console.error("[Storage] Download URL failed:", err);
+      res.status(500).json({ error: "Storage error" });
     }
   });
 }

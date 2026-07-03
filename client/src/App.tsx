@@ -6,7 +6,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { ThemeProvider } from "./contexts/ThemeContext";
 import Navigation from "./components/Navigation";
 import Footer from "./components/Footer";
-import LiquidChromeOGL from "./components/LiquidChromeOGL";
+import LiquidChrome from "./components/LiquidChrome";
 import Home from "./pages/Home";
 import About from "./pages/About";
 import Services from "./pages/Services";
@@ -54,7 +54,7 @@ function App() {
       <ThemeProvider defaultTheme="light">
         <TooltipProvider>
           <Toaster />
-          <LiquidChromeOGL baseColor={[0.1, 0.1, 0.1]} speed={0.2} amplitude={0.3} interactive={true} />
+          <LiquidChrome />
           <Router />
         </TooltipProvider>
       </ThemeProvider>
