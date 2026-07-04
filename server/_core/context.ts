@@ -60,6 +60,12 @@ async function getUserFromSupabase(authHeader: string | undefined): Promise<User
   }
 
   if (dbUser) {
+    // Update last signed in
+    await serviceClient
+      .from("users")
+      .update({ last_signed_in: new Date().toISOString() })
+      .eq("id", dbUser.id);
+
     return {
       id: dbUser.id,
       openId: dbUser.open_id,
@@ -74,17 +80,49 @@ async function getUserFromSupabase(authHeader: string | undefined): Promise<User
     };
   }
 
+  // Create user record for existing auth user (trigger handles new signups)
+  const isFirstUser = (await serviceClient.from("users").select("id", { count: "exact", head: true })).count === 0;
+
+  const { data: newUser, error: createError } = await serviceClient
+    .from("users")
+    .insert({
+      user_id: authUser.id,
+      email: authUser.email,
+      name: authUser.user_metadata?.full_name || authUser.email?.split("@")[0] || null,
+      login_method: "email",
+      role: isFirstUser ? "admin" : "user",
+    })
+    .select()
+    .single();
+
+  if (createError) {
+    console.error("[Context] Error creating user:", createError);
+    // Return temporary user with 'user' role if creation fails
+    return {
+      id: 0,
+      openId: authUser.id,
+      userId: authUser.id,
+      name: authUser.email?.split("@")[0] ?? null,
+      email: authUser.email ?? null,
+      loginMethod: "email",
+      role: "user",
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      lastSignedIn: new Date().toISOString(),
+    };
+  }
+
   return {
-    id: 0,
-    openId: authUser.id,
-    userId: authUser.id,
-    name: authUser.email?.split("@")[0] ?? null,
-    email: authUser.email ?? null,
-    loginMethod: "email",
-    role: "user",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-    lastSignedIn: new Date().toISOString(),
+    id: newUser.id,
+    openId: newUser.open_id,
+    userId: newUser.user_id,
+    name: newUser.name,
+    email: newUser.email,
+    loginMethod: newUser.login_method,
+    role: newUser.role,
+    createdAt: newUser.created_at,
+    updatedAt: newUser.updated_at,
+    lastSignedIn: newUser.last_signed_in,
   };
 }
 

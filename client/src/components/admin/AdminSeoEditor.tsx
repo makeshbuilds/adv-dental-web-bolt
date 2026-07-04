@@ -2,16 +2,24 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { trpc } from "@/lib/trpc";
 import { toast } from "sonner";
-import { Loader2 } from "lucide-react";
+import { Loader as Loader2 } from "lucide-react";
 
 export default function AdminSeoEditor() {
   const [pageSlug, setPageSlug] = useState("home");
   const { data: seoSettings, isLoading } = trpc.seo.getBySlug.useQuery(pageSlug);
   const updateMutation = trpc.seo.update.useMutation();
   const [formData, setFormData] = useState<any>({});
+
+  useEffect(() => {
+    if (seoSettings) {
+      setFormData(seoSettings);
+    } else {
+      setFormData({});
+    }
+  }, [seoSettings, pageSlug]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
